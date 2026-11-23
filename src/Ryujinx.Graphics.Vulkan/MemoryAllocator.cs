@@ -7,7 +7,7 @@ namespace Ryujinx.Graphics.Vulkan
 {
     class MemoryAllocator : IDisposable
     {
-        private const ulong MaxDeviceMemoryUsageEstimate = 16UL * 1024 * 1024 * 1024;
+        private const ulong MaxDeviceMemoryUsageEstimate = 192UL * 1024 * 1024;
 
         private readonly Vk _api;
         private readonly VulkanPhysicalDevice _physicalDevice;

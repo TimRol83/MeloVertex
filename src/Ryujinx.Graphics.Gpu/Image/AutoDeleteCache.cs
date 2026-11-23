@@ -1,6 +1,8 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace Ryujinx.Graphics.Gpu.Image
 {
@@ -45,13 +47,13 @@ namespace Ryujinx.Graphics.Gpu.Image
     /// </summary>
     class AutoDeleteCache : IEnumerable<Texture>
     {
-        private const int MinCountForDeletion = 32;
-        private const int MaxCapacity = 2048;
+        private const int MinCountForDeletion = 4;
+        private const int MaxCapacity = 384;
         private const ulong ProcessConstrainedMemoryThreshold = 8UL * 1024 * 1024 * 1024;
-        private const ulong MinTextureSizeCapacity = 512 * 1024 * 1024;
-        private const ulong MaxProcessTextureSizeCapacity = 2UL * 1024 * 1024 * 1024;
-        private const ulong MaxTextureSizeCapacity = 4UL * 1024 * 1024 * 1024;
-        private const ulong DefaultTextureSizeCapacity = 1UL * 1024 * 1024 * 1024;
+        private const ulong MinTextureSizeCapacity = 32UL * 1024 * 1024;
+        private const ulong MaxProcessTextureSizeCapacity = 128UL * 1024 * 1024;
+        private const ulong MaxTextureSizeCapacity = 128UL * 1024 * 1024;
+        private const ulong DefaultTextureSizeCapacity = 96UL * 1024 * 1024;
         private const double ProcessMemoryScaleFactor = 0.30d;
         private const float MemoryScaleFactor = 0.50f;
         private ulong _maxCacheMemoryUsage = 0;
@@ -151,10 +153,70 @@ namespace Ryujinx.Graphics.Gpu.Image
             }
         }
 
+        private static int _footprintTick;
+        private static ulong _cachedPhysFootprint;
+        private static long _lastEmergencyGcTick;
+
+        [DllImport("libSystem.B.dylib")]
+        private static extern uint mach_task_self();
+
+        [DllImport("libSystem.B.dylib")]
+        private static extern unsafe int task_info(uint target_task, int flavor, int* task_info_out, ref int task_info_count);
+
+        private static unsafe ulong GetIosPhysFootprint()
+        {
+            if ((++_footprintTick & 31) != 0 && _cachedPhysFootprint != 0)
+            {
+                return _cachedPhysFootprint;
+            }
+            if (!OperatingSystem.IsIOS() && !OperatingSystem.IsMacOS())
+            {
+                return 0;
+            }
+            const int TASK_VM_INFO = 22;
+            int count = 44;
+            int* info = stackalloc int[44];
+            if (task_info(mach_task_self(), TASK_VM_INFO, info, ref count) == 0 && count >= 24)
+            {
+                ulong fp = *(ulong*)(info + 22);
+                if (fp > 0)
+                {
+                    _cachedPhysFootprint = fp;
+                }
+            }
+            return _cachedPhysFootprint;
+        }
+
         private bool ShouldRemoveLeastUsedTexture()
         {
+            ulong fp = GetIosPhysFootprint();
+            ulong effectiveCap = _maxCacheMemoryUsage;
+            int minKeep = MinCountForDeletion;
+            if (fp >= 1210UL * 1024 * 1024)
+            {
+                effectiveCap = 4UL * 1024 * 1024;
+                minKeep = 1;
+                long now = Environment.TickCount64;
+                if (now - _lastEmergencyGcTick > 1500)
+                {
+                    _lastEmergencyGcTick = now;
+                    GC.Collect(2, GCCollectionMode.Forced, true, true);
+                    Thread.Sleep(40);
+                }
+            }
+            else if (fp >= 1130UL * 1024 * 1024)
+            {
+                effectiveCap = 16UL * 1024 * 1024;
+                minKeep = 2;
+                long now = Environment.TickCount64;
+                if (now - _lastEmergencyGcTick > 2500)
+                {
+                    _lastEmergencyGcTick = now;
+                    GC.Collect(2, GCCollectionMode.Forced, false);
+                }
+            }
             return _textures.Count > MaxCapacity ||
-                (_totalSize > _maxCacheMemoryUsage && _textures.Count >= MinCountForDeletion);
+                (_totalSize > effectiveCap && _textures.Count >= minKeep);
         }
 
         private void RemoveLeastUsedTexturesUntilWithinCapacity()
